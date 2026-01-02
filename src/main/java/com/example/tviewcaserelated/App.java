@@ -1,7 +1,8 @@
 package com.example.tviewcaserelated;
 
 import com.example.tviewcaserelated.config.DatabaseConfig;
-import com.example.tviewcaserelated.executor.CaseRelatedQueryExecutor;
+import com.example.tviewcaserelated.executor.StreamingQueryExecutor;
+import com.example.tviewcaserelated.executor.StreamingQueryExecutor.StreamingResult;
 import com.example.tviewcaserelated.model.CaseRelatedData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,18 +10,16 @@ import org.slf4j.LoggerFactory;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
 
 /**
- * Main application entry point for Tviewcaserelated Parallel Query Executor.
+ * Main application - STREAMING MODE for large datasets.
  * 
- * <p>Usage:</p>
- * <pre>
- *   mvn exec:java
- *   java -jar tviewcaserelated-executor-1.0.0.jar
- * </pre>
+ * This version processes rows one at a time without storing them all in memory.
+ * Use this for queries that return millions of rows.
+ * 
+ * Usage:
+ *   mvn exec:java -Dexec.args="--streaming"
+ *   java -Xmx512m -jar tviewcaserelated-executor-1.0.0.jar
  */
 public class App {
     
@@ -29,8 +28,8 @@ public class App {
     private static final String BANNER = """
             
             ╔═══════════════════════════════════════════════════════════════╗
-            ║     Tviewcaserelated Parallel Query Executor v1.0.0           ║
-            ║     Oracle Database Performance Testing Tool                   ║
+            ║     Tviewcaserelated Parallel Query Executor v1.1.0           ║
+            ║     STREAMING MODE - Memory Efficient                          ║
             ╚═══════════════════════════════════════════════════════════════╝
             """;
     
@@ -38,6 +37,9 @@ public class App {
     
     public static void main(String[] args) {
         System.out.println(BANNER);
+        
+        // Print JVM memory info
+        printMemoryInfo();
         
         int exitCode = 0;
         
@@ -47,42 +49,56 @@ public class App {
             
             // Test database connection
             if (!testConnection()) {
-                System.err.println("Failed to connect to database. Please check configuration.");
+                System.err.println("Failed to connect to database.");
                 System.exit(1);
             }
             
-            // Run parallel queries
+            // Run STREAMING queries - memory efficient
             System.out.println("\n" + SEPARATOR);
-            System.out.println("  EXECUTING PARALLEL QUERIES");
+            System.out.println("  EXECUTING STREAMING QUERIES");
             System.out.println(SEPARATOR);
             
-            CaseRelatedQueryExecutor executor = new CaseRelatedQueryExecutor();
-            List<CaseRelatedData> results = executor.executeParallel();
+            StreamingQueryExecutor executor = new StreamingQueryExecutor();
+            
+            // Only keep 10 sample rows in memory, but count everything
+            StreamingResult result = executor.executeWithSample(10);
             
             // Print results
-            printSampleResults(results);
-            printSummaryStatistics(results);
+            printSampleResults(result);
+            printSummaryStatistics(result);
+            
+            // Print final memory usage
+            printMemoryInfo();
             
         } catch (Exception e) {
             exitCode = 1;
             System.err.println("\n*** EXECUTION ERROR ***");
             System.err.println("Message: " + e.getMessage());
             logger.error("Execution failed", e);
+            e.printStackTrace();
         } finally {
-            // Clean up
             System.out.println("\n" + SEPARATOR);
             System.out.println("  CLEANUP");
             System.out.println(SEPARATOR);
             DatabaseConfig.shutdown();
-            System.out.println("Application finished with exit code: " + exitCode);
+            System.out.println("Exit code: " + exitCode);
         }
         
         System.exit(exitCode);
     }
     
-    /**
-     * Print current configuration settings.
-     */
+    private static void printMemoryInfo() {
+        Runtime rt = Runtime.getRuntime();
+        long totalMB = rt.totalMemory() / (1024 * 1024);
+        long freeMB = rt.freeMemory() / (1024 * 1024);
+        long usedMB = totalMB - freeMB;
+        long maxMB = rt.maxMemory() / (1024 * 1024);
+        
+        System.out.println("\n--- JVM Memory ---");
+        System.out.printf("  Used: %,d MB / Max: %,d MB (%.1f%%)%n", 
+                usedMB, maxMB, (usedMB * 100.0) / maxMB);
+    }
+    
     private static void printConfiguration() {
         System.out.println(SEPARATOR);
         System.out.println("  CONFIGURATION");
@@ -91,21 +107,17 @@ public class App {
         String dbUrl = DatabaseConfig.getProperty("db.url", "not configured");
         String dbUser = DatabaseConfig.getProperty("db.username", "not configured");
         int threadPool = DatabaseConfig.getIntProperty("executor.thread-pool-size", 4);
-        int fetchSize = DatabaseConfig.getIntProperty("executor.fetch-size", 1000);
-        int poolSize = DatabaseConfig.getIntProperty("db.pool.size", 10);
+        int fetchSize = DatabaseConfig.getIntProperty("executor.fetch-size", 500);
         String grades = DatabaseConfig.getProperty("query.grades", "4,5,7,11,12,13");
         
-        System.out.printf("  %-25s %s%n", "Database URL:", maskPassword(dbUrl));
+        System.out.printf("  %-25s %s%n", "Database URL:", maskUrl(dbUrl));
         System.out.printf("  %-25s %s%n", "Database User:", dbUser);
-        System.out.printf("  %-25s %d%n", "Connection Pool Size:", poolSize);
         System.out.printf("  %-25s %d%n", "Thread Pool Size:", threadPool);
         System.out.printf("  %-25s %,d%n", "Fetch Size:", fetchSize);
-        System.out.printf("  %-25s %s%n", "Grades to Process:", grades);
+        System.out.printf("  %-25s %s%n", "Grades:", grades);
+        System.out.printf("  %-25s %s%n", "Mode:", "STREAMING (memory efficient)");
     }
     
-    /**
-     * Test database connectivity and print database info.
-     */
     private static boolean testConnection() {
         System.out.println("\n" + SEPARATOR);
         System.out.println("  DATABASE CONNECTION TEST");
@@ -113,53 +125,31 @@ public class App {
         
         try (Connection conn = DatabaseConfig.getDataSource().getConnection()) {
             DatabaseMetaData meta = conn.getMetaData();
-            
             System.out.printf("  %-25s %s%n", "Status:", "✓ CONNECTED");
-            System.out.printf("  %-25s %s %s%n", "Database:", 
-                    meta.getDatabaseProductName(), 
-                    meta.getDatabaseProductVersion());
-            System.out.printf("  %-25s %s %s%n", "JDBC Driver:", 
-                    meta.getDriverName(), 
-                    meta.getDriverVersion());
-            System.out.printf("  %-25s %s%n", "Pool Stats:", 
-                    DatabaseConfig.getPoolStats());
-            
-            logger.info("Database connection successful");
+            System.out.printf("  %-25s %s%n", "Database:", meta.getDatabaseProductName());
             return true;
-            
         } catch (Exception e) {
             System.out.printf("  %-25s %s%n", "Status:", "✗ FAILED");
             System.out.printf("  %-25s %s%n", "Error:", e.getMessage());
-            logger.error("Database connection failed", e);
             return false;
         }
     }
     
-    /**
-     * Print sample results in formatted table.
-     */
-    private static void printSampleResults(List<CaseRelatedData> results) {
-        int sampleSize = DatabaseConfig.getIntProperty("output.sample-size", 10);
-        
+    private static void printSampleResults(StreamingResult result) {
         System.out.println("\n" + SEPARATOR);
-        System.out.println("  SAMPLE RESULTS (first " + sampleSize + ")");
+        System.out.println("  SAMPLE RESULTS (first " + result.getSample().size() + ")");
         System.out.println(SEPARATOR);
         
-        if (results.isEmpty()) {
-            System.out.println("  No results returned.");
+        if (result.getSample().isEmpty()) {
+            System.out.println("  No results.");
             return;
         }
         
-        // Print header
         System.out.printf("  %-12s %-12s %-6s %-8s %-10s %15s%n",
                 "TINSID", "TIN", "GRADE", "STATUS", "CASECODE", "TOTASSD");
         System.out.println("  " + "-".repeat(63));
         
-        // Print rows
-        int count = 0;
-        for (CaseRelatedData row : results) {
-            if (count++ >= sampleSize) break;
-            
+        for (CaseRelatedData row : result.getSample()) {
             System.out.printf("  %-12s %-12s %-6s %-8s %-10s %,15.2f%n",
                     row.getTinsid() != null ? row.getTinsid() : "N/A",
                     maskTin(row.getTin()),
@@ -168,76 +158,27 @@ public class App {
                     row.getCasecode() != null ? row.getCasecode() : "N/A",
                     row.getTotassd() != null ? row.getTotassd() : BigDecimal.ZERO);
         }
-        
-        if (results.size() > sampleSize) {
-            System.out.printf("%n  ... and %,d more records%n", results.size() - sampleSize);
-        }
     }
     
-    /**
-     * Print summary statistics.
-     */
-    private static void printSummaryStatistics(List<CaseRelatedData> results) {
+    private static void printSummaryStatistics(StreamingResult result) {
         System.out.println("\n" + SEPARATOR);
         System.out.println("  SUMMARY STATISTICS");
         System.out.println(SEPARATOR);
         
-        // Total records
-        System.out.printf("  %-30s %,d%n", "Total Records:", results.size());
-        
-        // Count by status
-        Map<String, Long> statusCounts = results.stream()
-                .collect(Collectors.groupingBy(
-                        r -> r.getStatus() != null ? r.getStatus() : "UNKNOWN",
-                        Collectors.counting()));
-        
-        System.out.println("\n  Records by Status:");
-        statusCounts.forEach((status, count) -> 
-                System.out.printf("    %-26s %,d%n", status + ":", count));
-        
-        // Count by grade
-        Map<Integer, Long> gradeCounts = results.stream()
-                .filter(r -> r.getCGrade() != null)
-                .collect(Collectors.groupingBy(
-                        CaseRelatedData::getCGrade,
-                        Collectors.counting()));
-        
-        System.out.println("\n  Records by Grade:");
-        gradeCounts.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .forEach(e -> System.out.printf("    Grade %-21d %,d%n", e.getKey(), e.getValue()));
-        
-        // Financial summary
-        BigDecimal totalAssessed = results.stream()
-                .map(CaseRelatedData::getTotassd)
-                .filter(t -> t != null)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        
-        BigDecimal totalBal941 = results.stream()
-                .map(CaseRelatedData::getBal941)
-                .filter(t -> t != null)
-                .reduce(BigDecimal.ZERO, BigDecimal::add);
-        
-        System.out.println("\n  Financial Summary:");
-        System.out.printf("    %-26s $%,15.2f%n", "Total Assessed:", totalAssessed);
-        System.out.printf("    %-26s $%,15.2f%n", "Total BAL_941:", totalBal941);
+        System.out.printf("  %-30s %,d%n", "Total Records:", result.getTotalCount());
+        System.out.printf("  %-30s %,d%n", "Open (O):", result.getOpenCount());
+        System.out.printf("  %-30s %,d%n", "Closed (C):", result.getClosedCount());
+        System.out.printf("  %-30s $%,.2f%n", "Total Assessed:", result.getTotalAssessed());
     }
     
-    /**
-     * Mask TIN for display (show only last 4 digits).
-     */
     private static String maskTin(String tin) {
-        if (tin == null || tin.length() < 4) {
-            return "***-**-****";
-        }
+        if (tin == null || tin.length() < 4) return "***-**-****";
         return "***-**-" + tin.substring(tin.length() - 4);
     }
     
-    /**
-     * Mask password in JDBC URL if present.
-     */
-    private static String maskPassword(String url) {
+    private static String maskUrl(String url) {
         if (url == null) return "null";
-        return url.replaceAll("password=[^&;]*", "password=****");
+        // Just show host portion
+        return url.length() > 50 ? url.substring(0, 50) + "..." : url;
     }
 }
