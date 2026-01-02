@@ -2,12 +2,17 @@ package com.example.tviewcaserelated.mapper;
 
 import com.example.tviewcaserelated.model.CaseRelatedData;
 
+import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 
 /**
  * Maps ResultSet rows to CaseRelatedData objects.
  * Handles null values and type conversions safely.
+ * 
+ * FIXED: ORA-17004 - Some columns can be DATE or VARCHAR depending on DECODE/CASE results.
+ * Using safe type conversion methods that handle Oracle's dynamic typing.
  */
 public class ResultSetMapper {
     
@@ -82,12 +87,12 @@ public class ResultSetMapper {
         data.setHGrade(getIntOrNull(rs, "H_GRADE"));
         data.setCasegrade(getIntOrNull(rs, "CASEGRADE"));
         
-        // Hours fields
-        data.setHours(rs.getBigDecimal("HOURS"));
-        data.setFldhrs(rs.getBigDecimal("FLDHRS"));
-        data.setEmphrs(rs.getBigDecimal("EMPHRS"));
-        data.setHrs(rs.getBigDecimal("HRS"));
-        data.setTothrs(rs.getBigDecimal("TOTHRS"));
+        // Hours fields - use safe BigDecimal getter
+        data.setHours(getBigDecimalSafe(rs, "HOURS"));
+        data.setFldhrs(getBigDecimalSafe(rs, "FLDHRS"));
+        data.setEmphrs(getBigDecimalSafe(rs, "EMPHRS"));
+        data.setHrs(getBigDecimalSafe(rs, "HRS"));
+        data.setTothrs(getBigDecimalSafe(rs, "TOTHRS"));
         
         // Tour/Program
         data.setBodcd(rs.getString("BODCD"));
@@ -95,15 +100,15 @@ public class ResultSetMapper {
         data.setPrgname1(rs.getString("PRGNAME1"));
         data.setPrgname2(rs.getString("PRGNAME2"));
         
-        // Financial fields
-        data.setTotassd(rs.getBigDecimal("TOTASSD"));
-        data.setBal94114(rs.getBigDecimal("BAL_941_14"));
-        data.setBal941(rs.getBigDecimal("BAL_941"));
-        data.setAgiAmt(rs.getBigDecimal("AGI_AMT"));
-        data.setTotIrpInc(rs.getBigDecimal("TOT_IRP_INC"));
-        data.setTotIncDelqYr(rs.getBigDecimal("TOT_INC_DELQ_YR"));
-        data.setPriorYrRetAgiAmt(rs.getBigDecimal("PRIOR_YR_RET_AGI_AMT"));
-        data.setTxperTxpyrAmt(rs.getBigDecimal("TXPER_TXPYR_AMT"));
+        // Financial fields - use safe BigDecimal getter
+        data.setTotassd(getBigDecimalSafe(rs, "TOTASSD"));
+        data.setBal94114(getBigDecimalSafe(rs, "BAL_941_14"));
+        data.setBal941(getBigDecimalSafe(rs, "BAL_941"));
+        data.setAgiAmt(getBigDecimalSafe(rs, "AGI_AMT"));
+        data.setTotIrpInc(getBigDecimalSafe(rs, "TOT_IRP_INC"));
+        data.setTotIncDelqYr(getBigDecimalSafe(rs, "TOT_INC_DELQ_YR"));
+        data.setPriorYrRetAgiAmt(getBigDecimalSafe(rs, "PRIOR_YR_RET_AGI_AMT"));
+        data.setTxperTxpyrAmt(getBigDecimalSafe(rs, "TXPER_TXPYR_AMT"));
         
         // Count fields
         data.setCnt94114(getIntOrNull(rs, "CNT_941_14"));
@@ -139,12 +144,18 @@ public class ResultSetMapper {
         // Other fields
         data.setNaicscd(rs.getString("NAICSCD"));
         data.setCcnipselectcd(rs.getString("CCNIPSELECTCD"));
+        
+        // ASSNQUE can be DATE or VARCHAR depending on CASE branch - read as String
         data.setAssnque(rs.getString("ASSNQUE"));
+        
         data.setDvictcd(rs.getString("DVICTCD"));
         data.setQpickind(rs.getString("QPICKIND"));
-        data.setEmptouch(rs.getBigDecimal("EMPTOUCH"));
-        data.setLsttouch(rs.getBigDecimal("LSTTOUCH"));
-        data.setTottouch(rs.getBigDecimal("TOTTOUCH"));
+        
+        // Touch fields - use safe BigDecimal getter
+        data.setEmptouch(getBigDecimalSafe(rs, "EMPTOUCH"));
+        data.setLsttouch(getBigDecimalSafe(rs, "LSTTOUCH"));
+        data.setTottouch(getBigDecimalSafe(rs, "TOTTOUCH"));
+        
         data.setProid(rs.getString("PROID"));
         data.setSelcode(rs.getString("SELCODE"));
         data.setStatus(rs.getString("STATUS"));
@@ -168,5 +179,46 @@ public class ResultSetMapper {
     private Integer getIntOrNull(ResultSet rs, String column) throws SQLException {
         int value = rs.getInt(column);
         return rs.wasNull() ? null : value;
+    }
+    
+    /**
+     * Safely get BigDecimal value, handling cases where column might be 
+     * a different type (DATE, VARCHAR, etc.) due to Oracle DECODE/CASE expressions.
+     * 
+     * This fixes ORA-17004: Invalid column type: getBigDecimal not implemented
+     */
+    private BigDecimal getBigDecimalSafe(ResultSet rs, String column) throws SQLException {
+        try {
+            // First try direct BigDecimal
+            BigDecimal value = rs.getBigDecimal(column);
+            return rs.wasNull() ? null : value;
+        } catch (SQLException e) {
+            // If getBigDecimal fails, try reading as Object and convert
+            if (e.getErrorCode() == 17004) {
+                Object obj = rs.getObject(column);
+                if (obj == null) {
+                    return null;
+                }
+                // Try to convert to BigDecimal
+                if (obj instanceof BigDecimal) {
+                    return (BigDecimal) obj;
+                } else if (obj instanceof Number) {
+                    return new BigDecimal(obj.toString());
+                } else if (obj instanceof String) {
+                    String str = ((String) obj).trim();
+                    if (str.isEmpty()) {
+                        return null;
+                    }
+                    try {
+                        return new BigDecimal(str);
+                    } catch (NumberFormatException nfe) {
+                        return null;
+                    }
+                }
+                // For DATE or other types, return null
+                return null;
+            }
+            throw e; // Re-throw other SQL exceptions
+        }
     }
 }
