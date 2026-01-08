@@ -1,5 +1,3 @@
----
-
 ## Problems to Fix
 
 ### 1. **You need proper executor shutdown** ✅
