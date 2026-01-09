@@ -217,3 +217,98 @@ public class ExecutorConfig {
 ---
 
 **But the main issue remains:** The cache still didn't complete. Did you add `FETCH FIRST 500 ROWS ONLY` to the SQL?
+
+
+I see the issue! You're using `@Autowired` but **the bean isn't created yet** when `@PreDestroy` runs, causing the same problem.
+
+---
+
+## The Problem
+
+**Line 20-21:**
+```java
+@Autowired
+private ExecutorService timeViewServiceExecutor;
+```
+
+This is circular - you're autowiring a bean that this same class creates. It can work, but causes issues during shutdown.
+
+---
+
+## The Fix
+
+Remove `@Autowired` and store the reference directly when creating the bean:
+
+```java
+@Configuration
+public class ExecutorConfig {
+    
+    public static final int TIMEVIEW_THREADPOOLSIZE = 4;
+    public static final int TIMEVIEW_FETCH_SIZE = 1000;
+    public static final int TIMEVIEW_TIMEOUT_SECONDS = 400;
+    
+    // REMOVE @Autowired - just a plain field
+    private ExecutorService timeViewServiceExecutor;
+    
+    @Bean(name = "entityServiceExecutor")
+    public Executor taskExecutor() {
+        ThreadPoolTaskExecutor threadPoolTaskExecutor = new ThreadPoolTaskExecutor();
+        threadPoolTaskExecutor.setThreadNamePrefix("EntityAsync-");
+        threadPoolTaskExecutor.setCorePoolSize(10);
+        threadPoolTaskExecutor.setMaxPoolSize(30);
+        threadPoolTaskExecutor.setKeepAliveSeconds(60);
+        threadPoolTaskExecutor.setWaitForTasksToCompleteOnShutdown(true);
+        threadPoolTaskExecutor.setQueueCapacity(100);
+        threadPoolTaskExecutor.initialize();
+        return threadPoolTaskExecutor;
+    }
+    
+    @Bean(name = "timeViewServiceExecutor")
+    public ExecutorService timeViewServiceExecutor() {
+        // Store reference HERE when creating
+        this.timeViewServiceExecutor = Executors.newFixedThreadPool(TIMEVIEW_THREADPOOLSIZE,
+            r -> {
+                Thread t = new Thread(r);
+                t.setName("EntityTimeViewQueryExecutorAsync-" + t.getId());
+                t.setDaemon(true);  // ADD THIS
+                return t;
+            });
+        return this.timeViewServiceExecutor;
+    }
+    
+    @PreDestroy
+    public void shutdown() {
+        // Now uses the stored reference, not autowired
+        if (timeViewServiceExecutor != null) {
+            timeViewServiceExecutor.shutdown();
+            try {
+                if (!timeViewServiceExecutor.awaitTermination(60, TimeUnit.SECONDS)) {
+                    timeViewServiceExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                timeViewServiceExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+}
+```
+
+---
+
+## Changes Summary
+
+| Line | Change |
+|------|--------|
+| 20-21 | **Remove** `@Autowired` - just use `private ExecutorService timeViewServiceExecutor;` |
+| 39 | **Add** `this.timeViewServiceExecutor = ` before `Executors.newFixedThreadPool(...)` |
+| 42 | **Add** `t.setDaemon(true);` |
+
+---
+
+## Why This Works
+
+| Before | After |
+|--------|-------|
+| `@Autowired` tries to inject during shutdown | Direct field reference, no injection needed |
+| Bean method called in `@PreDestroy` | Stored reference used in `@PreDestroy` |
