@@ -132,3 +132,88 @@ private List<TimeView> queryTimeViewData(String sql, int grade, boolean isInTime
 ---
 
 **What's your cache strategy?** Are you trying to cache all rows for all grades at startup? If so, that's the root cause of OOM - we need to rethink that approach.
+
+
+Good news - **no OOM this time!** The error is a Spring shutdown issue, which is easy to fix.
+
+---
+
+## The Problem
+
+```
+Error creating bean with name 'timeViewServiceExecutor': 
+Singleton bean creation not allowed while singletons of this factory are in destruction
+(Do not request a bean from a BeanFactory in a destroy method implementation!)
+```
+
+In your `@PreDestroy` method, you're calling `timeViewServiceExecutor()` which tries to **create a new bean** during shutdown - Spring doesn't allow that.
+
+---
+
+## The Fix
+
+Store the executor as a field instead of calling the method:
+
+```java
+@Configuration
+public class ExecutorConfig {
+    
+    public static final int TIMEVIEW_THREADPOOLSIZE = 4;
+    public static final int TIMEVIEW_FETCH_SIZE = 1000;
+    public static final int TIMEVIEW_TIMEOUT_SECONDS = 400;
+    
+    private ExecutorService timeViewExecutor;  // Store reference
+    
+    @Bean(name = "entityServiceExecutor")
+    public Executor taskExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(TIMEVIEW_THREADPOOLSIZE);
+        executor.setMaxPoolSize(TIMEVIEW_THREADPOOLSIZE);
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(60);
+        executor.initialize();
+        return executor;
+    }
+    
+    @Bean(name = "TimeViewServiceExecutor")
+    public ExecutorService timeViewServiceExecutor() {
+        // Store reference for shutdown
+        this.timeViewExecutor = Executors.newFixedThreadPool(TIMEVIEW_THREADPOOLSIZE, r -> {
+            Thread t = new Thread(r);
+            t.setName("EntityTimeViewQueryExecutorAsync-" + t.getId());
+            t.setDaemon(true);
+            return t;
+        });
+        return this.timeViewExecutor;
+    }
+    
+    @PreDestroy
+    public void shutdown() {
+        // Use stored reference, don't call bean method
+        if (timeViewExecutor != null) {
+            timeViewExecutor.shutdown();
+            try {
+                if (!timeViewExecutor.awaitTermination(60, TimeUnit.SECONDS)) {
+                    timeViewExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                timeViewExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+}
+```
+
+---
+
+## Key Change
+
+| Before (Wrong) | After (Correct) |
+|----------------|-----------------|
+| `timeViewServiceExecutor().shutdown()` | `this.timeViewExecutor.shutdown()` |
+| Calls bean method during destroy | Uses stored reference |
+
+---
+
+**But the main issue remains:** The cache still didn't complete. Did you add `FETCH FIRST 500 ROWS ONLY` to the SQL?
